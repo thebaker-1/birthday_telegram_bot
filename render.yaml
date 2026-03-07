@@ -1,11 +1,12 @@
 services:
-  - type: worker
+  - type: web
     name: birthday-bot
     env: python
-    plan: starter
+    plan: free
     autoDeploy: true
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
+    healthCheckPath: /healthz
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.2

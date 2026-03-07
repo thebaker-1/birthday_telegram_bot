@@ -1,5 +1,6 @@
-import asyncio, os
+import asyncio, os, threading
 from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from telegram import Update
@@ -12,6 +13,42 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 TOKEN = os.getenv("BOT_TOKEN", "")
 service = BirthdayService(BASE_DIR)
 store = None
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path not in {"/", "/healthz"}:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"not found\n")
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", "3")
+        self.end_headers()
+        self.wfile.write(b"ok\n")
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server():
+    port_text = os.getenv("PORT", "").strip()
+    if not port_text:
+        print("[health] PORT is not set. Skipping HTTP health server.")
+        return None
+
+    try:
+        port = int(port_text)
+    except ValueError as error:
+        raise RuntimeError(f"Invalid PORT value: {port_text}") from error
+
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    thread = threading.Thread(target=server.serve_forever, name="health-server", daemon=True)
+    thread.start()
+    print(f"[health] Listening on 0.0.0.0:{port}.")
+    return server
 
 def chat_id_of(update: Update):
     return update.effective_chat.id if update.effective_chat else 0
@@ -232,10 +269,12 @@ def start_scheduler(app: Application):
 
 def main():
     global store
+    health_server = None
     try:
         if not TOKEN:
             raise RuntimeError("BOT_TOKEN is missing. Set it in the environment or .env for local development.")
         store = BotStore(BASE_DIR)
+        health_server = start_health_server()
         print("[main] Building Application...")
         app = build_application()
         print("[main] Application built.")
@@ -247,5 +286,9 @@ def main():
         import traceback
         print("[main] Exception during startup:")
         traceback.print_exc()
+    finally:
+        if health_server is not None:
+            health_server.shutdown()
+            health_server.server_close()
 
 if __name__ == "__main__": main()
