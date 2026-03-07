@@ -1,0 +1,15 @@
+services:
+  - type: worker
+    name: birthday-bot
+    env: python
+    plan: starter
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.2
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
