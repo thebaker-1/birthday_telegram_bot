@@ -9,6 +9,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.2
+      - key: REQUIRE_DATABASE
+        value: true
       - key: BOT_TOKEN
         sync: false
       - key: DATABASE_URL

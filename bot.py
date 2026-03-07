@@ -10,8 +10,8 @@ from bot_store import BotStore
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 TOKEN = os.getenv("BOT_TOKEN", "")
-store = BotStore(BASE_DIR)
 service = BirthdayService(BASE_DIR)
+store = None
 
 def chat_id_of(update: Update):
     return update.effective_chat.id if update.effective_chat else 0
@@ -231,8 +231,11 @@ def start_scheduler(app: Application):
     return scheduler
 
 def main():
+    global store
     try:
-        if not TOKEN: raise RuntimeError("BOT_TOKEN is missing in .env")
+        if not TOKEN:
+            raise RuntimeError("BOT_TOKEN is missing. Set it in the environment or .env for local development.")
+        store = BotStore(BASE_DIR)
         print("[main] Building Application...")
         app = build_application()
         print("[main] Application built.")

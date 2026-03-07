@@ -9,18 +9,23 @@ class BotStore:
     def __init__(self, base_dir):
         self.base_dir = base_dir
         self.chat_ids_file = os.path.join(base_dir, "chat_ids.json")
+        self.require_database = os.getenv("REQUIRE_DATABASE", "").strip().lower() in {"1", "true", "yes", "on"}
         self.database_url = os.getenv("DATABASE_URL") or os.getenv("SUPABASE_DB_URL")
+        if self.require_database and not self.database_url:
+            raise RuntimeError("Database is required, but DATABASE_URL is not set.")
         self.use_postgres = bool(self.database_url)
         if self.use_postgres:
             self.conn = psycopg.connect(self.database_url or "")
             self.cursor = self.conn.cursor()
             self._init_postgres_tables()
             self.active_chat_ids = self._load_active_chats_from_db()
+            print("[store] Using Postgres backend.")
         else:
             self.conn = sqlite3.connect(os.path.join(base_dir, "birthdays.db"), check_same_thread=False)
             self.cursor = self.conn.cursor()
             self._init_sqlite_tables()
             self.active_chat_ids = self._load_chat_ids()
+            print("[store] Using local SQLite/JSON fallback backend.")
 
     def _init_sqlite_tables(self):
         self.cursor.execute("PRAGMA table_info(birthdays)")
