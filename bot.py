@@ -12,7 +12,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 TOKEN = os.getenv("BOT_TOKEN", "")
 service = BirthdayService(BASE_DIR)
-store = None
+store = BotStore(BASE_DIR)
 
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -98,50 +98,89 @@ async def reply(update: Update, text: str):
     elif update.effective_chat: await update.effective_chat.send_message(text)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat: store.track_chat_id(update.effective_chat.id, "start")
-    await celebrate(context.application)
-    await reply(update, "🎂 Birthday Bot is active!\nUse /help to see commands.")
+    try:
+        if update.effective_chat:
+            store.track_chat_id(update.effective_chat.id, "start")
+        await celebrate(context.application)
+        await reply(update, "🎂 Birthday Bot is active!\nUse /help to see commands.")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await reply(update, f"❌ Error in /start: {e}")
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply(update, HELP_TEXT)
 
 async def setbirthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user, args = update.effective_user, context.args or []
-    if not user: return await reply(update, "No user info available.")
-    if not args: return await reply(update, "Usage: /setbirthday YYYY-MM-DD")
-    birthday = args[0]
-    try: datetime.strptime(birthday, "%Y-%m-%d")
-    except ValueError: return await reply(update, "Usage: /setbirthday YYYY-MM-DD")
-    username = user.username or ""
-    store.save_birthday(chat_id_of(update), user.id, username, birthday, user.full_name or username)
-    await reply(update, "✅ Birthday saved!")
+    try:
+        user, args = update.effective_user, context.args or []
+        if not user: return await reply(update, "No user info available.")
+        if not args: return await reply(update, "Usage: /setbirthday YYYY-MM-DD")
+        birthday = args[0]
+        try:
+            datetime.strptime(birthday, "%Y-%m-%d")
+        except ValueError:
+            return await reply(update, "Usage: /setbirthday YYYY-MM-DD")
+        username = user.username or ""
+        store.save_birthday(chat_id_of(update), user.id, username, birthday, user.full_name or username)
+        await reply(update, "✅ Birthday saved!")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await reply(update, f"❌ Error in /setbirthday: {e}")
 
 async def mybirthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user: return await reply(update, "No user info available.")
-    row = store.get_birthday_for_user(chat_id_of(update), user.id)
-    await reply(update, f"🎂 Your birthday: {row[0]}" if row else "No birthday saved.")
+    try:
+        user = update.effective_user
+        if not user:
+            return await reply(update, "No user info available.")
+        row = store.get_birthday_for_user(chat_id_of(update), user.id)
+        await reply(update, f"🎂 Your birthday: {row[0]}" if row else "No birthday saved.")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await reply(update, f"❌ Error in /mybirthday: {e}")
 
 async def removebirthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not user: return await reply(update, "No user info available.")
-    store.delete_birthday_for_user(chat_id_of(update), user.id)
-    await reply(update, "Birthday removed.")
+    try:
+        user = update.effective_user
+        if not user:
+            return await reply(update, "No user info available.")
+        store.delete_birthday_for_user(chat_id_of(update), user.id)
+        await reply(update, "Birthday removed.")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await reply(update, f"❌ Error in /removebirthday: {e}")
 
 async def birthdays(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    today = datetime.now().strftime("%m-%d")
-    people = [service.format_birthday_name(display_name, username) for username, birthday, display_name in store.get_all_birthdays(chat_id_of(update)) if service.is_birthday_today(birthday, today)]
-    await reply(update, "🎉 Today's birthdays:\n" + "\n".join(people) if people else "No birthdays today.")
+    try:
+        today = datetime.now().strftime("%m-%d")
+        people = [service.format_birthday_name(display_name, username) for username, birthday, display_name in store.get_all_birthdays(chat_id_of(update)) if service.is_birthday_today(birthday, today)]
+        await reply(update, "🎉 Today's birthdays:\n" + "\n".join(people) if people else "No birthdays today.")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await reply(update, f"❌ Error in /birthdays: {e}")
 
 async def listbirthdays(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user, args, current_chat = update.effective_user, context.args or [], update.effective_chat
-    if not user: return await reply(update, "No user info available.")
-    chat_id = chat_id_of(update) if current_chat and current_chat.type != "private" else await pick_group(context, user.id, args[0] if args else "")
-    if not chat_id: return await reply(update, "Usage: /listbirthdays GROUP_NO in private chat, or run it inside the group.")
-    if not await require_admin(update, context, chat_id): return
-    rows = store.get_all_birthdays(chat_id)
-    if not rows: return await reply(update, "No birthdays saved in this group.")
-    await reply(update, f"🎂 Birthdays in {await chat_name(context, chat_id)}:\n" + render_birthdays(rows, datetime.now()))
+    try:
+        user, args, current_chat = update.effective_user, context.args or [], update.effective_chat
+        if not user:
+            return await reply(update, "No user info available.")
+        chat_id = chat_id_of(update) if current_chat and current_chat.type != "private" else await pick_group(context, user.id, args[0] if args else "")
+        if not chat_id:
+            return await reply(update, "Usage: /listbirthdays GROUP_NO in private chat, or run it inside the group.")
+        if not await require_admin(update, context, chat_id):
+            return
+        rows = store.get_all_birthdays(chat_id)
+        if not rows:
+            return await reply(update, "No birthdays saved in this group.")
+        await reply(update, f"🎂 Birthdays in {await chat_name(context, chat_id)}:\n" + render_birthdays(rows, datetime.now()))
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await reply(update, f"❌ Error in /listbirthdays: {e}")
 
 async def addbirthday(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = chat_id_of(update)
@@ -268,12 +307,10 @@ def start_scheduler(app: Application):
     return scheduler
 
 def main():
-    global store
     health_server = None
     try:
         if not TOKEN:
             raise RuntimeError("BOT_TOKEN is missing. Set it in the environment or .env for local development.")
-        store = BotStore(BASE_DIR)
         health_server = start_health_server()
         print("[main] Building Application...")
         app = build_application()
