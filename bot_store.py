@@ -3,9 +3,19 @@ import os
 import sqlite3
 
 import psycopg
+from psycopg import OperationalError
 
 
 class BotStore:
+    def reconnect(self):
+        if self.use_postgres:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            self.conn = psycopg.connect(self.database_url or "")
+            self.cursor = self.conn.cursor()
+
     def __init__(self, base_dir):
         self.base_dir = base_dir
         self.chat_ids_file = os.path.join(base_dir, "chat_ids.json")
@@ -118,61 +128,104 @@ class BotStore:
         print(f"Tracked chat ({source}): {chat_id}")
 
     def save_birthday(self, chat_id, user_id, username, birthday, display_name):
-        if self.use_postgres and user_id:
-            self.cursor.execute("DELETE FROM birthdays WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
-        elif self.use_postgres:
-            self.cursor.execute("DELETE FROM birthdays WHERE chat_id=%s AND username=%s", (chat_id, username))
-        elif user_id:
-            self.cursor.execute("DELETE FROM birthdays WHERE chat_id=? AND user_id=?", (chat_id, user_id))
-        else:
-            self.cursor.execute("DELETE FROM birthdays WHERE chat_id=? AND username=?", (chat_id, username))
-        if self.use_postgres:
-            self.cursor.execute(
-                "INSERT INTO birthdays (chat_id, user_id, username, birthday, display_name) VALUES (%s, %s, %s, %s, %s)",
-                (chat_id, user_id, username, birthday, display_name),
-            )
-        else:
-            self.cursor.execute(
-                "INSERT INTO birthdays (chat_id, user_id, username, birthday, display_name) VALUES (?, ?, ?, ?, ?)",
-                (chat_id, user_id, username, birthday, display_name),
-            )
-        self.conn.commit()
+        for attempt in range(2):
+            try:
+                if self.use_postgres and user_id:
+                    self.cursor.execute("DELETE FROM birthdays WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+                elif self.use_postgres:
+                    self.cursor.execute("DELETE FROM birthdays WHERE chat_id=%s AND username=%s", (chat_id, username))
+                elif user_id:
+                    self.cursor.execute("DELETE FROM birthdays WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+                else:
+                    self.cursor.execute("DELETE FROM birthdays WHERE chat_id=? AND username=?", (chat_id, username))
+                if self.use_postgres:
+                    self.cursor.execute(
+                        "INSERT INTO birthdays (chat_id, user_id, username, birthday, display_name) VALUES (%s, %s, %s, %s, %s)",
+                        (chat_id, user_id, username, birthday, display_name),
+                    )
+                else:
+                    self.cursor.execute(
+                        "INSERT INTO birthdays (chat_id, user_id, username, birthday, display_name) VALUES (?, ?, ?, ?, ?)",
+                        (chat_id, user_id, username, birthday, display_name),
+                    )
+                self.conn.commit()
+                break
+            except OperationalError:
+                if attempt == 1:
+                    raise
+                self.reconnect()
+            except Exception:
+                raise
 
     def get_all_birthdays(self, chat_id):
-        if self.use_postgres:
-            self.cursor.execute(
-                "SELECT username, TO_CHAR(birthday, 'YYYY-MM-DD'), display_name FROM birthdays WHERE chat_id=%s",
-                (chat_id,),
-            )
-        else:
-            self.cursor.execute("SELECT username, birthday, display_name FROM birthdays WHERE chat_id=?", (chat_id,))
-        return self.cursor.fetchall()
+        for attempt in range(2):
+            try:
+                if self.use_postgres:
+                    self.cursor.execute(
+                        "SELECT username, TO_CHAR(birthday, 'YYYY-MM-DD'), display_name FROM birthdays WHERE chat_id=%s",
+                        (chat_id,),
+                    )
+                else:
+                    self.cursor.execute("SELECT username, birthday, display_name FROM birthdays WHERE chat_id=?", (chat_id,))
+                result = self.cursor.fetchall()
+                return result if result is not None else []
+            except OperationalError:
+                if attempt == 1:
+                    break
+                self.reconnect()
+            except Exception:
+                break
+        return []
 
     def get_birthday_for_user(self, chat_id, user_id):
-        if self.use_postgres:
-            self.cursor.execute(
-                "SELECT TO_CHAR(birthday, 'YYYY-MM-DD') FROM birthdays WHERE chat_id=%s AND user_id=%s",
-                (chat_id, user_id),
-            )
-        else:
-            self.cursor.execute("SELECT birthday FROM birthdays WHERE chat_id=? AND user_id=?", (chat_id, user_id))
-        return self.cursor.fetchone()
+        for attempt in range(2):
+            try:
+                if self.use_postgres:
+                    self.cursor.execute(
+                        "SELECT TO_CHAR(birthday, 'YYYY-MM-DD') FROM birthdays WHERE chat_id=%s AND user_id=%s",
+                        (chat_id, user_id),
+                    )
+                else:
+                    self.cursor.execute("SELECT birthday FROM birthdays WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+                return self.cursor.fetchone()
+            except OperationalError:
+                if attempt == 1:
+                    raise
+                self.reconnect()
+            except Exception:
+                raise
 
     def delete_birthday_for_user(self, chat_id, user_id):
-        if self.use_postgres:
-            self.cursor.execute("DELETE FROM birthdays WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
-        else:
-            self.cursor.execute("DELETE FROM birthdays WHERE chat_id=? AND user_id=?", (chat_id, user_id))
-        self.conn.commit()
-        return self.cursor.rowcount > 0
+        for attempt in range(2):
+            try:
+                if self.use_postgres:
+                    self.cursor.execute("DELETE FROM birthdays WHERE chat_id=%s AND user_id=%s", (chat_id, user_id))
+                else:
+                    self.cursor.execute("DELETE FROM birthdays WHERE chat_id=? AND user_id=?", (chat_id, user_id))
+                self.conn.commit()
+                return self.cursor.rowcount > 0
+            except OperationalError:
+                if attempt == 1:
+                    raise
+                self.reconnect()
+            except Exception:
+                raise
 
     def delete_birthday_for_username(self, chat_id, username):
-        if self.use_postgres:
-            self.cursor.execute("DELETE FROM birthdays WHERE chat_id=%s AND username=%s", (chat_id, username))
-        else:
-            self.cursor.execute("DELETE FROM birthdays WHERE chat_id=? AND username=?", (chat_id, username))
-        self.conn.commit()
-        return self.cursor.rowcount > 0
+        for attempt in range(2):
+            try:
+                if self.use_postgres:
+                    self.cursor.execute("DELETE FROM birthdays WHERE chat_id=%s AND username=%s", (chat_id, username))
+                else:
+                    self.cursor.execute("DELETE FROM birthdays WHERE chat_id=? AND username=?", (chat_id, username))
+                self.conn.commit()
+                return self.cursor.rowcount > 0
+            except OperationalError:
+                if attempt == 1:
+                    raise
+                self.reconnect()
+            except Exception:
+                raise
 
     def import_legacy_birthdays(self, chat_id):
         if self.use_postgres:
