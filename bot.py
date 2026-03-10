@@ -1,6 +1,8 @@
-import asyncio, os, threading
+import asyncio, json, os, threading, traceback
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import ClassVar
+
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 from telegram import Update
@@ -11,11 +13,29 @@ from bot_store import BotStore
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_DELIVERY_MODE = os.getenv("BOT_DELIVERY_MODE", "").strip().lower()
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "").strip().rstrip("/")
+WEBHOOK_PATH = os.getenv("WEBHOOK_PATH", "/telegram/webhook").strip() or "/telegram/webhook"
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "").strip()
 service = BirthdayService(BASE_DIR)
 store = BotStore(BASE_DIR)
 
 
+def log(message: str):
+    print(message, flush=True)
+
+
+def normalize_webhook_path(path: str):
+    return path if path.startswith("/") else f"/{path}"
+
+
+WEBHOOK_PATH = normalize_webhook_path(WEBHOOK_PATH)
+
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    application: ClassVar[Application | None] = None
+    update_loop: ClassVar[asyncio.AbstractEventLoop | None] = None
+
     def do_GET(self):
         if self.path not in {"/", "/healthz"}:
             self.send_response(404)
@@ -29,11 +49,48 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"ok\n")
 
+    def do_POST(self):
+        if self.path != WEBHOOK_PATH:
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"not found\n")
+            return
+
+        if WEBHOOK_SECRET_TOKEN:
+            received_secret = self.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if received_secret != WEBHOOK_SECRET_TOKEN:
+                log("[webhook] Rejected request with invalid secret token.")
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(b"forbidden\n")
+                return
+
+        content_length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(content_length)
+        try:
+            if self.application is None or self.update_loop is None:
+                raise RuntimeError("Webhook server is not initialized.")
+            payload = json.loads(raw_body.decode("utf-8"))
+            update = Update.de_json(payload, self.application.bot)
+            future = asyncio.run_coroutine_threadsafe(self.application.update_queue.put(update), self.update_loop)
+            future.result(timeout=10)
+            update_id = payload.get("update_id", "unknown")
+            log(f"[webhook] Accepted update {update_id}.")
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok\n")
+        except Exception:
+            log("[webhook] Failed to process incoming update:")
+            traceback.print_exc()
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(b"error\n")
+
     def log_message(self, format, *args):
         return
 
 
-def start_health_server():
+def start_http_server(application: Application, update_loop: asyncio.AbstractEventLoop):
     port_text = os.getenv("PORT", "").strip()
     if not port_text:
         print("[health] PORT is not set. Skipping HTTP health server.")
@@ -44,11 +101,23 @@ def start_health_server():
     except ValueError as error:
         raise RuntimeError(f"Invalid PORT value: {port_text}") from error
 
+    HealthCheckHandler.application = application
+    HealthCheckHandler.update_loop = update_loop
     server = ThreadingHTTPServer(("0.0.0.0", port), HealthCheckHandler)
     thread = threading.Thread(target=server.serve_forever, name="health-server", daemon=True)
     thread.start()
-    print(f"[health] Listening on 0.0.0.0:{port}.")
+    log(f"[http] Listening on 0.0.0.0:{port}.")
+    log(f"[http] Health endpoint ready at /healthz.")
+    log(f"[http] Telegram webhook endpoint ready at {WEBHOOK_PATH}.")
     return server
+
+
+def should_use_webhooks():
+    if BOT_DELIVERY_MODE == "webhook":
+        return True
+    if BOT_DELIVERY_MODE == "polling":
+        return False
+    return bool(WEBHOOK_BASE_URL)
 
 def chat_id_of(update: Update):
     return update.effective_chat.id if update.effective_chat else 0
@@ -269,7 +338,7 @@ async def celebrate(app: Application):
             else: print(f"No birthday announcement was delivered for {username} in {chat_id}.")
     print("Birthday notification(s) sent for today." if sent_any else "No birthdays to notify today.")
 
-async def weekly(context: ContextTypes.DEFAULT_TYPE):
+async def weekly(app: Application):
     today, week = datetime.now(), datetime.now() + timedelta(days=7)
     for chat_id in store.active_chat_ids:
         upcoming = []
@@ -277,7 +346,7 @@ async def weekly(context: ContextTypes.DEFAULT_TYPE):
             this_year = datetime.strptime(birthday, "%Y-%m-%d").replace(year=today.year)
             if today <= this_year <= week: upcoming.append(service.format_birthday_name(display_name, username))
         if upcoming:
-            await context.bot.send_message(chat_id, "📅 Upcoming birthdays this week:\n" + "".join(f"🎂 {person}\n" for person in upcoming))
+            await app.bot.send_message(chat_id, "📅 Upcoming birthdays this week:\n" + "".join(f"🎂 {person}\n" for person in upcoming))
 
 async def track_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat: store.track_chat_id(update.effective_chat.id, "message")
@@ -287,45 +356,99 @@ async def track_group_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = update.my_chat_member.new_chat_member.status if update.my_chat_member else None
     if chat and chat.type in ["group", "supergroup"] and status in ["administrator", "member"]: store.track_chat_id(chat.id, "my_chat_member")
 
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    log("[error] Unhandled exception while processing update.")
+    if isinstance(update, Update):
+        log(f"[error] Update id: {update.update_id}")
+    if context.error is not None:
+        traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
+
 def build_application():
     app = Application.builder().token(TOKEN).build()
     for command, handler in (("start", start), ("help", help_cmd), ("setbirthday", setbirthday), ("mybirthday", mybirthday), ("removebirthday", removebirthday), ("birthdays", birthdays), ("listbirthdays", listbirthdays), ("addbirthday", addbirthday), ("mygroups", mygroups), ("addbirthdayto", addbirthdayto), ("listallbirthdays", listallbirthdays), ("removeuserbirthday", removeuserbirthday), ("removebirthdayfrom", removebirthdayfrom)):
         app.add_handler(CommandHandler(command, handler))
     app.add_handler(MessageHandler(filters.ALL, track_chat), group=1)
     app.add_handler(ChatMemberHandler(track_group_add, ChatMemberHandler.MY_CHAT_MEMBER), group=0)
+    app.add_error_handler(error_handler)
     return app
 
-def start_scheduler(app: Application):
+def start_scheduler(app: Application, update_loop: asyncio.AbstractEventLoop | None = None):
     scheduler = BackgroundScheduler()
-    def run_async_job(coro):
-        try: asyncio.get_running_loop()
-        except RuntimeError: asyncio.run(coro)
-        else: asyncio.create_task(coro)
-    scheduler.add_job(lambda: asyncio.run(celebrate(app)), "cron", hour=0, minute=0)
-    scheduler.add_job(lambda: run_async_job(weekly(CallbackContext(application=app))), "cron", day_of_week="sun", hour=9)
+
+    def run_async_job(name: str, coro):
+        try:
+            log(f"[scheduler] Running job: {name}")
+            if update_loop is None:
+                asyncio.run(coro)
+            else:
+                future = asyncio.run_coroutine_threadsafe(coro, update_loop)
+                future.result()
+            log(f"[scheduler] Completed job: {name}")
+        except Exception:
+            log(f"[scheduler] Job failed: {name}")
+            traceback.print_exc()
+
+    scheduler.add_job(lambda: run_async_job("celebrate", celebrate(app)), "cron", hour=0, minute=0)
+    scheduler.add_job(lambda: run_async_job("weekly", weekly(app)), "cron", day_of_week="sun", hour=9)
     scheduler.start()
     return scheduler
 
+
+async def run_webhook_app():
+    if not WEBHOOK_BASE_URL:
+        raise RuntimeError("WEBHOOK_BASE_URL is required when BOT_DELIVERY_MODE=webhook.")
+
+    app = build_application()
+    server = None
+    scheduler = None
+    started = False
+    webhook_url = f"{WEBHOOK_BASE_URL}{WEBHOOK_PATH}"
+
+    try:
+        log("[main] Building Application...")
+        await app.initialize()
+        await app.start()
+        started = True
+        log("[main] Application started.")
+        await app.bot.set_webhook(
+            url=webhook_url,
+            secret_token=WEBHOOK_SECRET_TOKEN or None,
+            allowed_updates=Update.ALL_TYPES,
+        )
+        log(f"[webhook] Registered webhook: {webhook_url}")
+        scheduler = start_scheduler(app, asyncio.get_running_loop())
+        log("[main] Scheduler started.")
+        server = start_http_server(app, asyncio.get_running_loop())
+        log("[main] Webhook bot is running...")
+        await asyncio.Event().wait()
+    finally:
+        log("[main] Shutting down...")
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+        if started:
+            await app.stop()
+        await app.shutdown()
+
 def main():
-    health_server = None
     try:
         if not TOKEN:
             raise RuntimeError("BOT_TOKEN is missing. Set it in the environment or .env for local development.")
-        health_server = start_health_server()
-        print("[main] Building Application...")
+        if should_use_webhooks():
+            asyncio.run(run_webhook_app())
+            return
+        log("[main] Starting in polling mode.")
         app = build_application()
-        print("[main] Application built.")
+        log("[main] Application built.")
         start_scheduler(app)
-        print("[main] Scheduler started.")
-        print("Bot running...")
+        log("[main] Scheduler started.")
+        log("[main] Bot running with polling...")
         app.run_polling()
     except Exception:
-        import traceback
         print("[main] Exception during startup:")
         traceback.print_exc()
-    finally:
-        if health_server is not None:
-            health_server.shutdown()
-            health_server.server_close()
 
 if __name__ == "__main__": main()

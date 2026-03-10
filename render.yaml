@@ -12,7 +12,13 @@ services:
         value: 3.13.2
       - key: REQUIRE_DATABASE
         value: true
+      - key: BOT_DELIVERY_MODE
+        value: webhook
       - key: BOT_TOKEN
         sync: false
       - key: DATABASE_URL
+        sync: false
+      - key: WEBHOOK_BASE_URL
+        sync: false
+      - key: WEBHOOK_SECRET_TOKEN
         sync: false
